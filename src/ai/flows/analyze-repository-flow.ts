@@ -18,6 +18,9 @@ import { Octokit } from 'octokit';
 // Basic Octokit instance. For production, you'd want to use an authenticated client.
 const octokit = new Octokit();
 
+// Simple in-memory cache to avoid hitting rate limits during development.
+const repoContentCache = new Map<string, any>();
+
 // Helper to decode Base64 content
 function fromBase64(content: string): string {
   return Buffer.from(content, 'base64').toString('utf-8');
@@ -38,6 +41,10 @@ const fetchRepositoryContent = ai.defineTool(
     }),
   },
   async ({ repoUrl }) => {
+    if (repoContentCache.has(repoUrl)) {
+      return repoContentCache.get(repoUrl);
+    }
+    
     const urlMatch = repoUrl.match(/github\.com\/([^/]+\/[^/]+)/);
     if (!urlMatch) {
       throw new Error('Invalid GitHub URL format.');
@@ -55,40 +62,42 @@ const fetchRepositoryContent = ai.defineTool(
         readme = fromBase64(data.content);
       }
     } catch (e) {
-      console.warn(`Could not fetch README for ${owner}/${repo}:`, e);
+      console.warn(`Could not fetch README for ${owner}/${repo}. It might not exist.`);
     }
     
     // Fetch package.json
     try {
       const { data } = await octokit.rest.repos.getContent({ owner, repo, path: 'package.json' });
-      // @ts-ignore
-      if (data && data.content) {
-        // @ts-ignore
+      if (data && 'content' in data) {
         packageJson = fromBase64(data.content);
       }
     } catch (e) {
-      console.warn(`Could not fetch package.json for ${owner}/${repo}:`, e);
+      console.warn(`Could not fetch package.json for ${owner}/${repo}. It might not exist.`);
     }
 
     // Fetch file tree
     try {
       const { data: repoData } = await octokit.rest.repos.get({ owner, repo });
       const defaultBranch = repoData.default_branch;
-      const { data: treeData } = await octokit.rest.git.getTree({
-        owner,
-        repo,
-        tree_sha: defaultBranch,
-        recursive: '1',
-      });
+      if (defaultBranch) {
+        const { data: treeData } = await octokit.rest.git.getTree({
+          owner,
+          repo,
+          tree_sha: defaultBranch,
+          recursive: '1',
+        });
 
-      if (treeData.tree) {
-        fileTree = treeData.tree.map(file => file.path).join('\n');
+        if (treeData.tree) {
+          fileTree = treeData.tree.map(file => file.path).join('\n');
+        }
       }
     } catch (e) {
-      console.warn(`Could not fetch file tree for ${owner}/${repo}:`, e);
+      console.warn(`Could not fetch file tree for ${owner}/${repo}.`);
     }
     
-    return { readme, packageJson, fileTree };
+    const result = { readme, packageJson, fileTree };
+    repoContentCache.set(repoUrl, result);
+    return result;
   }
 );
 
