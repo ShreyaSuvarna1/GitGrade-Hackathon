@@ -13,12 +13,21 @@ import {z} from 'genkit';
 import { generateRepositoryScore } from './generate-repository-score';
 import { generateRepositorySummary } from './generate-repository-summary';
 import { generatePersonalizedRoadmap } from './generate-personalized-roadmap';
+import { Octokit } from 'octokit';
+
+// Basic Octokit instance. For production, you'd want to use an authenticated client.
+const octokit = new Octokit();
+
+// Helper to decode Base64 content
+function fromBase64(content: string): string {
+  return Buffer.from(content, 'base64').toString('utf-8');
+}
 
 // Define a tool for fetching repository content
 const fetchRepositoryContent = ai.defineTool(
   {
     name: 'fetchRepositoryContent',
-    description: 'Fetches content from a GitHub repository, like README, package.json, etc.',
+    description: 'Fetches content from a GitHub repository, like README, package.json, and file tree.',
     inputSchema: z.object({
       repoUrl: z.string().url().describe('The URL of the repository to fetch content from.'),
     }),
@@ -29,65 +38,57 @@ const fetchRepositoryContent = ai.defineTool(
     }),
   },
   async ({ repoUrl }) => {
-    // This is a placeholder. In a real app, you'd fetch this from the GitHub API.
-    console.log(`Fetching content for ${repoUrl}`);
-    return {
-      readme: `# Sample Project
+    const urlMatch = repoUrl.match(/github\.com\/([^/]+\/[^/]+)/);
+    if (!urlMatch) {
+      throw new Error('Invalid GitHub URL format.');
+    }
+    const [owner, repo] = urlMatch[1].split('/');
 
-This is a sample README for a project created with Next.js and Tailwind CSS.
+    let readme: string | undefined;
+    let packageJson: string | undefined;
+    let fileTree: string | undefined;
 
-## Features
-- React
-- Next.js
-- Tailwind CSS
+    // Fetch README
+    try {
+      const { data } = await octokit.rest.repos.getReadme({ owner, repo });
+      if ('content' in data) {
+        readme = fromBase64(data.content);
+      }
+    } catch (e) {
+      console.warn(`Could not fetch README for ${owner}/${repo}:`, e);
+    }
+    
+    // Fetch package.json
+    try {
+      const { data } = await octokit.rest.repos.getContent({ owner, repo, path: 'package.json' });
+      // @ts-ignore
+      if (data && data.content) {
+        // @ts-ignore
+        packageJson = fromBase64(data.content);
+      }
+    } catch (e) {
+      console.warn(`Could not fetch package.json for ${owner}/${repo}:`, e);
+    }
 
-## Getting Started
+    // Fetch file tree
+    try {
+      const { data: repoData } = await octokit.rest.repos.get({ owner, repo });
+      const defaultBranch = repoData.default_branch;
+      const { data: treeData } = await octokit.rest.git.getTree({
+        owner,
+        repo,
+        tree_sha: defaultBranch,
+        recursive: '1',
+      });
 
-First, run the development server:
-
-\'\'\'bash
-npm run dev
-\'\'\'
-`,
-      packageJson: JSON.stringify({
-        name: 'sample-project',
-        version: '1.0.0',
-        private: true,
-        scripts: {
-          dev: 'next dev',
-          build: 'next build',
-          start: 'next start',
-          lint: 'next lint',
-          test: 'jest',
-        },
-        dependencies: {
-          next: '14.2.3',
-          react: '18.3.1',
-          'react-dom': '18.3.1',
-        },
-        devDependencies: {
-          '@types/node': '20.12.2',
-          '@types/react': '18.2.73',
-          eslint: '8.57.0',
-          'eslint-config-next': '14.2.3',
-          jest: '29.7.0',
-          typescript: '5.4.3',
-        },
-      }),
-      fileTree: `
-/
-├── src/
-│   ├── app/
-│   │   ├── page.tsx
-│   │   └── layout.tsx
-│   ├── components/
-│   └── lib/
-├── public/
-├── package.json
-├── next.config.js
-└── README.md
-      `,
-    };
+      if (treeData.tree) {
+        fileTree = treeData.tree.map(file => file.path).join('\n');
+      }
+    } catch (e) {
+      console.warn(`Could not fetch file tree for ${owner}/${repo}:`, e);
+    }
+    
+    return { readme, packageJson, fileTree };
   }
 );
 
@@ -115,14 +116,14 @@ const analysisPrompt = ai.definePrompt({
 
 You must use the 'fetchRepositoryContent' tool to get information about the repository. Base your analysis on the content provided by the tool.
 
-- codeQuality: Judge based on the dependencies in package.json (are they modern?), presence of linting or testing scripts.
+- codeQuality: Judge based on the dependencies in package.json (are they modern?), presence of linting or testing scripts. If package.json is missing, score it low.
 - projectStructure: Based on the file tree, is it a well-organized for a modern web project?
-- documentation: How good is the README? Is it comprehensive and clear?
-- testCoverage: Are there test scripts in package.json? Is there a testing framework mentioned? If no tests are found, score this low.
+- documentation: How good is the README? Is it comprehensive and clear? If it's missing or short, score it low.
+- testCoverage: Are there test scripts in package.json? Is there a testing framework mentioned? Are there test files in the file tree? If no tests are found, score this low.
 - realWorldRelevance: Based on the README description, does this project solve a real problem or is it just a demo?
 - commitConsistency: (This is hard to determine without commit history). Provide a default score of 75 if other signals are positive, otherwise 50.
 
-If you cannot determine a score for a category from the provided context, provide a reasonable default based on the information you do have. Do not ask for more information.
+If you cannot determine a score for a category from the provided context (e.g., a file is missing), provide a reasonable default score and note the reason in your internal thoughts. Do not ask for more information.
 `,
 });
 
