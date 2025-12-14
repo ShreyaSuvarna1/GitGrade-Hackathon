@@ -10,9 +10,41 @@ import {ai} from '@/ai/genkit';
 import {z} from 'genkit';
 import { Octokit } from 'octokit';
 
-// Schemas and Types are defined in the action file to avoid exporting non-async values from a "use server" file.
+// Schemas are defined in this file to avoid circular dependencies.
+// The types are exported from the actions file.
 import type { AnalyzeRepositoryInput, AnalyzeRepositoryOutput } from '@/app/analysis/actions';
-import { AnalyzeRepositoryInputSchema, AnalyzeRepositoryOutputSchema } from '@/app/analysis/actions';
+
+const AnalyzeRepositoryInputSchema = z.object({
+  repoUrl: z.string().url(),
+});
+
+const RoadmapStepSchema = z.object({
+  step: z.string().describe('The actionable step to improve the repository.'),
+  priority: z.enum(['High', 'Medium', 'Low']).describe('The priority of the step.'),
+  effortEstimate: z.string().describe('An estimate of the effort required to complete the step.'),
+});
+
+const AnalyzeRepositoryOutputSchema = z.object({
+  analysis: z.object({
+    codeQuality: z.number().min(0).max(100),
+    projectStructure: z.number().min(0).max(100),
+    documentation: z.number().min(0).max(100),
+    testCoverage: z.number().min(0).max(100),
+    realWorldRelevance: z.number().min(0).max(100),
+    commitConsistency: z.number().min(0).max(100),
+  }),
+  score: z.object({
+    numericalScore: z.number().describe('A numerical score representing the overall quality of the repository (0-100).'),
+    skillLevel: z.enum(['Beginner', 'Intermediate', 'Advanced']).describe('The skill level category of the repository.'),
+    badge: z.enum(['Bronze', 'Silver', 'Gold']).describe('The badge associated with the repository.'),
+  }),
+  summary: z.object({
+    summary: z.string().describe('A concise (2-3 sentences) summary of the repository\'s strengths and weaknesses.'),
+  }),
+  roadmap: z.object({
+    roadmap: z.array(RoadmapStepSchema).describe('A list of actionable steps to improve the repository.'),
+  }),
+});
 
 
 // Basic Octokit instance. For production, you'd want to use an authenticated client.
@@ -156,7 +188,7 @@ const analyzeRepositoryFlow = ai.defineFlow(
     if (!output) {
         throw new Error("Failed to get analysis from AI. The model did not return a valid output.");
     }
-    // The repoUrl is added back into the final object here.
+    // The repoUrl is NOT part of the AI output, so it's added back into the final object here.
     return { ...output, repoUrl };
   }
 );
