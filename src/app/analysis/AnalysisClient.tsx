@@ -27,8 +27,6 @@ export default function AnalysisClient() {
     startTransition(async () => {
       try {
         setError(null);
-        // Artificial delay to showcase the loading animation
-        await new Promise(resolve => setTimeout(resolve, 2500));
         const analysisData = await analyzeRepository({ repoUrl });
         setResult(analysisData);
       } catch (e: any) {
