@@ -3,16 +3,14 @@
 /**
  * @fileOverview This file defines a Genkit flow for analyzing a GitHub repository.
  *
- * - analyzeRepositoryFlow - A function that orchestrates the analysis of a repository.
- * - AnalyzeRepositoryInput - The input type for the analyzeRepositoryFlow function.
- * - AnalysisResult - The return type for the analyzeRepositoryFlow function.
+ * - analyzeRepository - A function that orchestrates the analysis of a repository, 
+ *   including scoring, summarization, and roadmap generation.
+ * - AnalyzeRepositoryInput - The input type for the analyzeRepository function.
+ * - AnalyzeRepositoryOutput - The return type for the analyzeRepository function.
  */
 
 import {ai} from '@/ai/genkit';
 import {z} from 'genkit';
-import { generateRepositoryScore } from './generate-repository-score';
-import { generateRepositorySummary } from './generate-repository-summary';
-import { generatePersonalizedRoadmap } from './generate-personalized-roadmap';
 import { Octokit } from 'octokit';
 
 // Basic Octokit instance. For production, you'd want to use an authenticated client.
@@ -23,7 +21,12 @@ const repoContentCache = new Map<string, any>();
 
 // Helper to decode Base64 content
 function fromBase64(content: string): string {
-  return Buffer.from(content, 'base64').toString('utf-8');
+  try {
+    return Buffer.from(content, 'base64').toString('utf-8');
+  } catch (e) {
+    console.error('Failed to decode base64 content', e);
+    return '';
+  }
 }
 
 // Define a tool for fetching repository content
@@ -37,7 +40,7 @@ const fetchRepositoryContent = ai.defineTool(
     outputSchema: z.object({
       readme: z.string().optional().describe('Content of README.md file.'),
       packageJson: z.string().optional().describe('Content of package.json file.'),
-      fileTree: z.string().optional().describe('A string representing the repository file tree.'),
+      fileTree: z.string().optional().describe('A string representing the repository file tree, with each file on a new line.'),
     }),
   },
   async ({ repoUrl }) => {
@@ -47,9 +50,10 @@ const fetchRepositoryContent = ai.defineTool(
     
     const urlMatch = repoUrl.match(/github\.com\/([^/]+\/[^/]+)/);
     if (!urlMatch) {
-      throw new Error('Invalid GitHub URL format.');
+      throw new Error('Invalid GitHub URL format. Expected format: https://github.com/owner/repo');
     }
-    const [owner, repo] = urlMatch[1].split('/');
+    const repoPath = urlMatch[1];
+    const [owner, repo] = repoPath.split('/');
 
     let readme: string | undefined;
     let packageJson: string | undefined;
@@ -68,7 +72,8 @@ const fetchRepositoryContent = ai.defineTool(
     // Fetch package.json
     try {
       const { data } = await octokit.rest.repos.getContent({ owner, repo, path: 'package.json' });
-      if (data && 'content' in data) {
+      // The data type from getContent is complex, so we need to check if it's a file with content
+      if (data && !Array.isArray(data) && 'content' in data) {
         packageJson = fromBase64(data.content);
       }
     } catch (e) {
@@ -101,86 +106,87 @@ const fetchRepositoryContent = ai.defineTool(
   }
 );
 
-const AnalyzeRepositoryInputSchema = z.object({
+export const AnalyzeRepositoryInputSchema = z.object({
   repoUrl: z.string().url(),
 });
 export type AnalyzeRepositoryInput = z.infer<typeof AnalyzeRepositoryInputSchema>;
 
-const AnalysisResultSchema = z.object({
-  codeQuality: z.number().min(0).max(100),
-  projectStructure: z.number().min(0).max(100),
-  documentation: z.number().min(0).max(100),
-  testCoverage: z.number().min(0).max(100),
-  realWorldRelevance: z.number().min(0).max(100),
-  commitConsistency: z.number().min(0).max(100),
+const RoadmapStepSchema = z.object({
+  step: z.string().describe('The actionable step to improve the repository.'),
+  priority: z.enum(['High', 'Medium', 'Low']).describe('The priority of the step.'),
+  effortEstimate: z.string().describe('An estimate of the effort required to complete the step.'),
 });
-export type AnalysisResult = z.infer<typeof AnalysisResultSchema>;
+
+export const AnalyzeRepositoryOutputSchema = z.object({
+  analysis: z.object({
+    codeQuality: z.number().min(0).max(100),
+    projectStructure: z.number().min(0).max(100),
+    documentation: z.number().min(0).max(100),
+    testCoverage: z.number().min(0).max(100),
+    realWorldRelevance: z.number().min(0).max(100),
+    commitConsistency: z.number().min(0).max(100),
+  }),
+  score: z.object({
+    numericalScore: z.number().describe('A numerical score representing the overall quality of the repository (0-100).'),
+    skillLevel: z.enum(['Beginner', 'Intermediate', 'Advanced']).describe('The skill level category of the repository.'),
+    badge: z.enum(['Bronze', 'Silver', 'Gold']).describe('The badge associated with the repository.'),
+  }),
+  summary: z.object({
+    summary: z.string().describe('A concise (2-3 sentences) summary of the repository\'s strengths and weaknesses.'),
+  }),
+  roadmap: z.object({
+    roadmap: z.array(RoadmapStepSchema).describe('A list of actionable steps to improve the repository.'),
+  }),
+});
+export type AnalyzeRepositoryOutput = z.infer<typeof AnalyzeRepositoryOutputSchema>;
 
 const analysisPrompt = ai.definePrompt({
   name: 'repositoryAnalysisPrompt',
-  input: { schema: z.object({ repoUrl: z.string().url() }) },
-  output: { schema: AnalysisResultSchema },
+  input: { schema: AnalyzeRepositoryInputSchema },
+  output: { schema: AnalyzeRepositoryOutputSchema },
   tools: [fetchRepositoryContent],
-  prompt: `You are an expert code reviewer. Analyze the GitHub repository at the URL {{repoUrl}} and provide scores from 0 to 100 for each category.
+  prompt: `You are an AI expert code reviewer and mentor. Your task is to analyze a GitHub repository and provide a comprehensive evaluation.
 
-You must use the 'fetchRepositoryContent' tool to get information about the repository. Base your analysis on the content provided by the tool.
+You must perform all of the following steps and return a single JSON object matching the full output schema:
 
-- codeQuality: Judge based on the dependencies in package.json (are they modern?), presence of linting or testing scripts. If package.json is missing, score it low.
-- projectStructure: Based on the file tree, is it a well-organized for a modern web project?
-- documentation: How good is the README? Is it comprehensive and clear? If it's missing or short, score it low.
-- testCoverage: Are there test scripts in package.json? Is there a testing framework mentioned? Are there test files in the file tree? If no tests are found, score this low.
-- realWorldRelevance: Based on the README description, does this project solve a real problem or is it just a demo?
-- commitConsistency: (This is hard to determine without commit history). Provide a default score of 75 if other signals are positive, otherwise 50.
+1.  **Fetch Repository Content**: Use the 'fetchRepositoryContent' tool with the provided 'repoUrl' to get the repository's README, package.json, and file tree.
 
-If you cannot determine a score for a category from the provided context (e.g., a file is missing), provide a reasonable default score and note the reason in your internal thoughts. Do not ask for more information.
+2.  **Analyze and Score**: Based on the fetched content, provide scores from 0 to 100 for each category in the 'analysis' object.
+    -   **codeQuality**: Judge based on dependencies in package.json (are they modern?), presence of linting/testing scripts. If package.json is missing, score it low (e.g., 20).
+    -   **projectStructure**: Based on the file tree, is it well-organized for a modern web project? (e.g., presence of src, components, etc.). If file tree is missing, score low (e.g., 20).
+    -   **documentation**: How good is the README? Is it comprehensive and clear? If it's missing or very short, score it low (e.g., 10).
+    -   **testCoverage**: Are there test scripts in package.json? Is a testing framework mentioned? Are there test files in the file tree (e.g., files ending in .test.js or .spec.ts)? If no tests are found, score this 0.
+    -   **realWorldRelevance**: Based on the README description, does this project solve a real problem or is it just a demo/tutorial? If README is missing, make a best guess from other info or default to 50.
+    -   **commitConsistency**: This is hard to determine without commit history. Provide a default score of 75 if other signals are positive, otherwise 50.
+
+3.  **Calculate Overall Score**: In the 'score' object, calculate the 'numericalScore' as a weighted average of your analysis scores:
+    -   Code Quality: 30%
+    -   Project Structure: 20%
+    -   Documentation: 15%
+    -   Test Coverage: 15%
+    -   Real-world Relevance: 10%
+    -   Commit Consistency: 10%
+    -   Then, determine the 'skillLevel' (Beginner: 0-50, Intermediate: 51-80, Advanced: 81-100) and 'badge' (Bronze: 0-40, Silver: 41-70, Gold: 71-100).
+
+4.  **Generate Summary**: In the 'summary' object, write a concise 2-3 sentence 'summary' of the repository's main strengths and weaknesses based on your analysis.
+
+5.  **Create Roadmap**: In the 'roadmap' object, generate a 'roadmap' with 3-5 actionable steps the developer can take to improve their repository. Each step must include a 'priority' (High, Medium, Low) and an 'effortEstimate' (e.g., "1 hour", "2 days").
+
+If you cannot determine a score or information for a category (e.g., a file is missing), **do not ask for more information**. Provide a reasonable default score based on the rules above and proceed with the analysis. You must return the full JSON object.
 `,
 });
 
-export const analyzeRepositoryFlow = ai.defineFlow(
+export const analyzeRepository = ai.defineFlow(
   {
     name: 'analyzeRepositoryFlow',
     inputSchema: AnalyzeRepositoryInputSchema,
-    outputSchema: AnalysisResultSchema,
+    outputSchema: AnalyzeRepositoryOutputSchema,
   },
   async ({ repoUrl }) => {
     const { output } = await analysisPrompt({ repoUrl });
     if (!output) {
-        throw new Error("Failed to get analysis from AI");
+        throw new Error("Failed to get analysis from AI. The model did not return a valid output.");
     }
-    return output;
+    return { ...output, repoUrl };
   }
 );
-
-export async function runFullAnalysis(input: AnalyzeRepositoryInput) {
-  const analysisResult = await analyzeRepositoryFlow(input);
-
-  const summaryInput = {
-    codeQuality: `Code quality scored ${analysisResult.codeQuality}/100.`,
-    projectStructure: `Project structure scored ${analysisResult.projectStructure}/100.`,
-    documentation: `Documentation scored ${analysisResult.documentation}/100.`,
-    testCoverage: `Test coverage scored ${analysisResult.testCoverage}/100.`,
-    realWorldRelevance: `Real-world relevance scored ${analysisResult.realWorldRelevance}/100.`,
-    commitConsistency: `Commit consistency scored ${analysisResult.commitConsistency}/100.`,
-  };
-
-  const roadmapInput = {
-    repositoryAnalysis: Object.entries(summaryInput)
-      .map(([key, value]) => `${key}: ${value}`)
-      .join('\n'),
-  };
-
-  // Run all generations in parallel
-  const [score, summary, roadmap] = await Promise.all([
-    generateRepositoryScore(analysisResult),
-    generateRepositorySummary(summaryInput),
-    generatePersonalizedRoadmap(roadmapInput),
-  ]);
-
-  return {
-    score,
-    summary,
-    roadmap,
-    repoUrl: input.repoUrl,
-    analysis: analysisResult,
-  };
-}

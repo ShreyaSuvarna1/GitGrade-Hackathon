@@ -1,25 +1,25 @@
 'use server';
 
 import { z } from 'zod';
-import { runFullAnalysis } from '@/ai/flows/analyze-repository-flow';
+import { analyzeRepository as analyzeRepositoryFlow, AnalyzeRepositoryInputSchema } from '@/ai/flows/analyze-repository-flow';
 
-const analyzeRepositoryInputSchema = z.object({
-  repoUrl: z.string().url(),
-});
-
-export async function analyzeRepository(input: z.infer<typeof analyzeRepositoryInputSchema>) {
-  const validatedInput = analyzeRepositoryInputSchema.safeParse(input);
+export async function analyzeRepository(input: z.infer<typeof AnalyzeRepositoryInputSchema>) {
+  const validatedInput = AnalyzeRepositoryInputSchema.safeParse(input);
 
   if (!validatedInput.success) {
-    throw new Error('Invalid input');
+    // Creating a more detailed error message
+    const errorMessage = validatedInput.error.issues.map(issue => issue.message).join(', ');
+    throw new Error(`Invalid input: ${errorMessage}`);
   }
 
   try {
-    const result = await runFullAnalysis(validatedInput.data);
+    const result = await analyzeRepositoryFlow(validatedInput.data);
     return result;
-  } catch (error) {
-    console.error('Error in AI flows:', error);
-    throw new Error('Failed to generate repository analysis. The AI service may be temporarily unavailable.');
+  } catch (error: any) {
+    console.error('Error in AI flow:', error);
+    // Pass a more specific error message if available
+    const message = error.message || 'Failed to generate repository analysis. The AI service may be temporarily unavailable.';
+    throw new Error(message);
   }
 }
 
